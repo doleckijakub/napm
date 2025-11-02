@@ -1,10 +1,16 @@
-use alpm::{Alpm, Package, SigLevel, TransFlag, Usage};
+use alpm::{
+    Alpm, AnyDownloadEvent, DownloadEvent, DownloadEventCompleted, DownloadEventProgress,
+    DownloadResult, Package, SigLevel, TransFlag, Usage,
+};
 use anyhow::{Result, anyhow};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use libarchive2::ReadArchive;
 use std::{
+    collections::HashMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 pub struct Pkg {
@@ -41,8 +47,6 @@ impl Napm {
         let mut handle = Alpm::new(root, &dbpath) //
             .map_err(|e| anyhow!("failed to initialize alpm: {e}"))?;
 
-        handle.add_cachedir(format!("{root}/var/cache/pacman/pkg").as_str())?;
-
         // TODO: get from config
         let dbs = [
             (
@@ -76,6 +80,13 @@ impl Napm {
                 db.set_usage(Usage::all())?;
             }
         }
+
+        handle.add_cachedir(format!("{root}/var/cache/pacman/pkg").as_str())?;
+
+        handle.set_parallel_downloads(5);
+
+        let download_progress = Arc::new(Mutex::new((MultiProgress::new(), HashMap::new())));
+        handle.set_dl_cb(download_progress, download_callback);
 
         Ok(Self {
             handle: Some(handle),
@@ -425,3 +436,88 @@ impl Drop for Napm {
         }
     }
 }
+
+fn download_callback(
+    file: &str,
+    ev: AnyDownloadEvent,
+    bars: &mut Arc<Mutex<(MultiProgress, HashMap<String, ProgressBar>)>>,
+) {
+    let style =
+        ProgressStyle::with_template("[{elapsed:>3}] [{bar:40.cyan/blue}] {percent:>3}% {msg}")
+            .unwrap()
+            .progress_chars("#>-");
+
+    let style_failed =
+        ProgressStyle::with_template("[{elapsed:>3}] [{bar:40.red/blue}] {percent:>3}% {msg}")
+            .unwrap()
+            .progress_chars("#>-");
+
+    match ev.event() {
+        DownloadEvent::Init(_) => {
+            let mut bars_guard = bars.lock().unwrap();
+            let (mp, bar_map) = &mut *bars_guard;
+
+            if let std::collections::hash_map::Entry::Vacant(e) = bar_map.entry(file.to_string()) {
+                let pb = mp.add(ProgressBar::new(100));
+                pb.set_style(style.clone());
+                pb.set_message(file.to_string());
+                e.insert(pb);
+            }
+        }
+
+        DownloadEvent::Progress(DownloadEventProgress { downloaded, total }) => {
+            let bars_guard = bars.lock().unwrap();
+            let (_, bar_map) = &*bars_guard;
+
+            if let Some(pb) = bar_map.get(file) {
+                pb.set_length(total as u64);
+                pb.set_position(downloaded as u64);
+            }
+        }
+
+        DownloadEvent::Completed(DownloadEventCompleted { total, result }) => {
+            let mut bars_guard = bars.lock().unwrap();
+            let (_, bar_map) = &mut *bars_guard;
+
+            if let Some(pb) = bar_map.remove(file) {
+                pb.set_position(total as u64);
+                match result {
+                    DownloadResult::Success => pb.finish_with_message(format!("{file} done")),
+                    DownloadResult::UpToDate => {
+                        pb.finish_with_message(format!("{file} up to date"))
+                    }
+                    DownloadResult::Failed => {
+                        pb.set_style(style_failed.clone());
+                        pb.finish_with_message(format!("{file} failed"));
+                    }
+                }
+            }
+        }
+
+        DownloadEvent::Retry(_) => {}
+    }
+}
+
+// fn progress_callback(
+//     progress: Progress,
+//     file: &str,
+//     _percent: i32,
+//     _howmany: usize,
+//     _current: usize,
+//     _: &mut (),
+// ) {
+//     println!("{progress:?} {file}");
+
+//     match progress {
+//         Progress::AddStart => {}
+//         Progress::UpgradeStart => {}
+//         Progress::DowngradeStart => {}
+//         Progress::ReinstallStart => {}
+//         Progress::RemoveStart => {}
+//         Progress::ConflictsStart => {}
+//         Progress::DiskspaceStart => {}
+//         Progress::IntegrityStart => {}
+//         Progress::LoadStart => {}
+//         Progress::KeyringStart => {}
+//     }
+// }
