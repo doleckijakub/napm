@@ -522,7 +522,7 @@ impl Napm {
                 .files()
                 .files()
                 .iter()
-                .map(|f| f.name().to_owned())
+                .map(|f| String::from_utf8(f.name().into()).unwrap())
                 .collect());
         }
 
