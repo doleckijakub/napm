@@ -2,16 +2,16 @@ use alpm::{
     Alpm, AnyDownloadEvent, DownloadEvent, DownloadEventCompleted, DownloadEventProgress,
     DownloadResult, Error as AlpmErr, Package, Progress, SigLevel, TransFlag, Usage,
 };
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
+use flate2::read::GzDecoder;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::{
     collections::HashMap,
-    fs, io,
+    fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
 };
 use tar::Archive;
-use zstd::stream::read::Decoder;
 
 use crate::ansi::*;
 
@@ -332,58 +332,24 @@ impl Napm {
         Ok(out.into_iter().map(Pkg::from).collect())
     }
 
-    pub fn unarchive_files_db(archive_path: &Path, extract_to: &Path) -> anyhow::Result<()> {
-        let file = fs::File::open(archive_path)
-            .with_context(|| format!("failed to open archive: {}", archive_path.display()))?;
-
-        let decoder = Decoder::new(file).context("failed to create zstd decoder")?;
-
-        let mut archive = Archive::new(decoder);
-
+    fn unarchive_files_db(archive_path: &Path, extract_to: &Path) -> Result<()> {
         if extract_to.exists() {
-            fs::remove_dir_all(extract_to)
-                .with_context(|| format!("failed to delete {}", extract_to.display()))?;
+            fs::remove_dir_all(extract_to)?;
         }
-
         fs::create_dir_all(extract_to)?;
 
-        for entry_result in archive.entries()? {
-            let mut entry = entry_result?;
+        let file = fs::File::open(archive_path)
+            .map_err(|e| anyhow!("failed to open archive {}: {}", archive_path.display(), e))?;
+        let decoder = GzDecoder::new(file);
+        let mut archive = Archive::new(decoder);
 
-            let entry_path = match entry.path() {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-
-            if entry_path.as_os_str().is_empty() || entry_path == Path::new(".") {
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            let path = entry.path()?.to_path_buf();
+            if path.as_os_str().is_empty() || path == Path::new(".") {
                 continue;
             }
-
-            let full_path = extract_to.join(&entry_path);
-
-            if entry.header().entry_type().is_dir() {
-                fs::create_dir_all(&full_path)?;
-                continue;
-            }
-
-            if entry.header().entry_type().is_file() {
-                if let Some(parent) = full_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-
-                let mut outfile = fs::File::create(&full_path)?;
-                io::copy(&mut entry, &mut outfile)?;
-
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Ok(mode) = entry.header().mode() {
-                        fs::set_permissions(&full_path, fs::Permissions::from_mode(mode))?;
-                    }
-                }
-
-                continue;
-            }
+            entry.unpack_in(extract_to)?;
         }
 
         Ok(())
