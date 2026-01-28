@@ -1,5 +1,5 @@
 pkgname=napm
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc="NeoArch package manager"
 arch=('x86_64')

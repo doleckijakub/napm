@@ -1,31 +1,25 @@
 use alpm::{
     Alpm, AnyEvent, AnyQuestion, AnyDownloadEvent, DownloadEvent, DownloadEventCompleted,
-    DownloadEventProgress, DownloadResult, Progress, Usage,
+    DownloadEventProgress, DownloadResult, Usage,
 };
 use indicatif::{MultiProgress, ProgressBar};
 use pacmanconf::Config;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    path::PathBuf,
 };
 
 use crate::ansi::*;
 use crate::error::{Error, Result};
 use crate::pkg::Pkg;
-use crate::log_fatal;
+use crate::{log_info, log_warn, log_error};
 use crate::util::{confirm, choose};
 
 pub mod actions;
 pub mod auto_repair;
 pub mod util;
 pub mod style;
-
-// CFG
-
-pub struct ConfigOverride {
-    pub root: Option<String>,
-}
+pub mod cache;
 
 // NAPM ERROR DATA
 
@@ -56,65 +50,27 @@ enum NapmErrorData {
 }
 
 pub struct Napm {
+    config: Config,
     handle: Option<Alpm>,
 }
 
 impl Napm {
-    pub fn cfg(cfg_override: ConfigOverride) -> Result<Config> {
-        let cfg = if let Some(root) = cfg_override.root {
-            use cini::Ini;
+    pub fn new() -> Result<Self> {
+        let cfg = Config::new().map_err(|_| Error::ConfigParse)?;
 
-            let mut config = Config::default();
-
-            let conf = { // because pacmanconf::Config does not use --sysroot option, but --root, I have to parse pacman-conf output by myself
-                let mut cmd = std::process::Command::new("pacman-conf");
-                
-                cmd.arg("--sysroot").arg(root);
-
-                let output = cmd.output()?;
-
-                if !output.status.success() {
-                    log_fatal!("Your config is incorrect");
-                    for line in String::from_utf8(output.stderr).map_err(|_| Error::ConfigParse)?.lines() {
-                        log_fatal!("    {line}");
-                    }
-                    return Err(Error::ConfigParse);
-                }
-
-                let mut conf = String::from_utf8(output.stdout).map_err(|_| Error::ConfigParse)?;
-                if conf.ends_with('\n') {
-                    conf.pop().unwrap();
-                }
-
-                conf
-            };
-
-            config.parse_str(&conf).map_err(|_| Error::ConfigParse)?;
-
-            Ok(config)
-        } else {
-            Config::new()
+        if cfg.root_dir != "/" {
+            unimplemented!("Non / root");
         }
-        .map_err(|_| Error::ConfigParse)?;
 
-        Ok(cfg)
-    }
-
-    pub fn new(cfg_override: ConfigOverride) -> Result<Self> {
-        let cfg = Self::cfg(cfg_override)?;
-
-        let root_dir: Vec<u8> = cfg.root_dir.clone().into();
-        let db_path: Vec<u8> = cfg.db_path.into();
-
-        let mut handle = Alpm::new(root_dir, db_path)?;
+        let mut handle = Alpm::new("/", &cfg.db_path)?;
 
         let arch = cfg.architecture.first().map(String::as_str).unwrap();
 
         for dir in &cfg.cache_dir {
             let path: Vec<u8> = if dir.starts_with('/') {
-                format!("{}{}", &cfg.root_dir, &dir)
+                dir.clone()
             } else {
-                format!("{}/{}", &cfg.root_dir, &dir)
+                format!("/{}", &dir)
             }
             .into();
 
@@ -148,21 +104,16 @@ impl Napm {
                 db.add_server(url)?;
             }
 
-            db.set_usage(Usage::all())?; // TODO: from config?
+            db.set_usage(Usage::all())?; // TODO? take from config
         }
 
-        {
-            let mut path = PathBuf::new();
-            path.push(cfg.root_dir);
-            path.push("/usr/share/libalpm/hooks");
-            handle.add_hookdir(path.display().to_string())?;
-        }
+        handle.add_hookdir("/usr/share/libalpm/hooks")?;
         
-        for hook_dir in cfg.hook_dir {
-            handle.add_hookdir(hook_dir)?;
+        for hook_dir in &cfg.hook_dir {
+            handle.add_hookdir(hook_dir.clone())?;
         }
 
-        let gpg_dir: Vec<u8> = cfg.gpg_dir.into();
+        let gpg_dir: Vec<u8> = cfg.gpg_dir.clone().into();
         handle.set_gpgdir(gpg_dir)?;
 
         // callbacks
@@ -172,14 +123,15 @@ impl Napm {
 
         handle.set_event_cb((), event_callback);
 
-        let other_progress = Arc::new(Mutex::new((MultiProgress::new(), HashMap::new())));
-        handle.set_progress_cb(other_progress, progress_callback);
+        // let other_progress = Arc::new(Mutex::new((MultiProgress::new(), HashMap::new())));
+        // handle.set_progress_cb(other_progress, progress_callback);
 
         handle.set_question_cb((), question_callback);
 
         // TODO: handle.set_fetch_cb
 
         Ok(Self {
+            config: cfg,
             handle: Some(handle),
         })
     }
@@ -198,7 +150,61 @@ fn event_callback(
     ev: AnyEvent,
     _: &mut (),
 ) {
-    crate::log_debug!("{:?}", ev.event()); // TODO: handle accordingly
+    use alpm::{PackageOperation, HookWhen};
+
+    use alpm::Event as E;
+    match ev.event() {
+        E::CheckDepsStart => log_info!("Checking dependencies"),
+        E::CheckDepsDone => (),
+        E::FileConflictsStart => log_info!("Checking for file conflicts"),
+        E::FileConflictsDone => (),
+        E::ResolveDepsStart => log_info!("Resolving dependencies"),
+        E::ResolveDepsDone => (),
+        E::InterConflictsStart => log_info!("Checking for conflicts"),
+        E::InterConflictsDone => (),
+        E::TransactionStart => log_info!("Starting transaction"), // TODO: command specific message
+        E::TransactionDone => (),
+        E::PackageOperationStart(pkg_op_ev) => match pkg_op_ev.operation() {
+            PackageOperation::Install(p) => log_info!("Installing {}-{}", p.name(), p.version()),
+            PackageOperation::Upgrade(p1, p2) => log_info!("Upgrading {} from {} to {}", p1.name(), p1.version(), p2.version()),
+            PackageOperation::Reinstall(p1, _p2) => log_info!("Reinstalling {}-{}", p1.name(), p1.version()),
+            PackageOperation::Downgrade(p1, p2) => log_info!("Downgrading {} ({} => {})", p1.name(), p1.version(), p2.version()),
+            PackageOperation::Remove(p) => log_info!("Removing {}-{}", p.name(), p.version()),
+        },
+        E::PackageOperationDone(_) => (),
+        E::IntegrityStart => log_info!("Checking for file integrity"),
+        E::IntegrityDone => (),
+        E::LoadStart => (),
+        E::LoadDone => (),
+        E::ScriptletInfo(scriptlet_info) => log_info!("  {}", scriptlet_info.line().trim()),
+        E::RetrieveStart => log_info!("Retrieving packages"),
+        E::RetrieveDone => (),
+        E::RetrieveFailed => log_info!("Failed to retrieve packages"),
+        E::PkgRetrieveStart(retrieve_ev) => log_info!("Retrieving {} packages, total size {}", retrieve_ev.num(), retrieve_ev.total_size()),
+        E::PkgRetrieveDone(_retrieve_ev) => (),
+        E::PkgRetrieveFailed(_retrieve_ev) => log_error!("Package retireve failed"),
+        E::DiskSpaceStart => log_info!("Checking availible disk space"),
+        E::DiskSpaceDone => (),
+        E::OptDepRemoval(opt_dep_rm_ev) => if let Some(desc) = opt_dep_rm_ev.optdep().desc() {
+            log_info!("Package {} optionally requires {}: {}", opt_dep_rm_ev.pkg().name(), opt_dep_rm_ev.optdep().name(), desc)
+        } else {
+            log_info!("Package {} optionally requires {}", opt_dep_rm_ev.pkg().name(), opt_dep_rm_ev.optdep().name())
+        }
+        E::DatabaseMissing(dm_missing_ev) => log_error!("Database {} missing", dm_missing_ev.dbname()),
+        E::KeyringStart => log_info!("Checking keys in keyring"),
+        E::KeyringDone => (),
+        E::KeyDownloadStart => log_info!("Downloading keys"),
+        E::KeyDownloadDone => (),
+        E::PacnewCreated(pacnew_ev) => log_warn!("File {} installed as {}.pacnew", pacnew_ev.file(), pacnew_ev.file()),
+        E::PacsaveCreated(pacsave_ev) => log_warn!("File {} saved as {}.pacsave", pacsave_ev.file(), pacsave_ev.file()),
+        E::HookStart(hook_ev) => log_info!("Running {} hooks", match hook_ev.when() {
+            HookWhen::PreTransaction => "pre transaction",
+            HookWhen::PostTransaction => "post transaction",
+        }),
+        E::HookDone(_hook_ev) => (),
+        E::HookRunStart(hook_run_ev) => log_info!("Running hook {}/{}: {}", hook_run_ev.position(), hook_run_ev.total(), hook_run_ev.desc().unwrap_or(hook_run_ev.name()).trim_end_matches("...")),
+        E::HookRunDone(_hook_run_ev) => (),
+    };
 }
 
 fn question_callback(
@@ -321,27 +327,27 @@ fn download_callback(
     }
 }
 
-fn progress_callback(
-    progress: Progress,
-    file: &str,
-    percent: i32,
-    how_many: usize,
-    current: usize,
-    bars: &mut Arc<Mutex<(MultiProgress, HashMap<String, ProgressBar>)>>,
-) {
-    let mut bars_guard = bars.lock().unwrap();
-    let (mp, bar_map) = &mut *bars_guard;
+// fn progress_callback(
+//     progress: Progress,
+//     file: &str,
+//     percent: i32,
+//     how_many: usize,
+//     current: usize,
+//     bars: &mut Arc<Mutex<(MultiProgress, HashMap<String, ProgressBar>)>>,
+// ) {
+//     let mut bars_guard = bars.lock().unwrap();
+//     let (mp, bar_map) = &mut *bars_guard;
 
-    if let std::collections::hash_map::Entry::Vacant(e) = bar_map.entry(file.to_string()) {
-        let pb = mp.add(ProgressBar::new(100));
-        pb.set_style(Napm::progress_bar_style(false).clone());
-        pb.set_message(file.to_string());
+//     if let std::collections::hash_map::Entry::Vacant(e) = bar_map.entry(file.to_string()) {
+//         let pb = mp.add(ProgressBar::new(100));
+//         pb.set_style(Napm::progress_bar_style(false).clone());
+//         pb.set_message(file.to_string());
 
-        e.insert(pb);
-    }
+//         e.insert(pb);
+//     }
 
-    let pb: &mut ProgressBar = bar_map.get_mut(file).unwrap();
+//     let pb: &mut ProgressBar = bar_map.get_mut(file).unwrap();
 
-    pb.set_length(percent as u64);
-    pb.set_message(format!("{file} {:?} {}/{}", progress, current, how_many));
-}
+//     pb.set_length(percent as u64);
+//     pb.set_message(format!("{file} {:?} {}/{}", progress, current, how_many));
+// }

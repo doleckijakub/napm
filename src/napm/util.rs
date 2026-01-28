@@ -1,16 +1,8 @@
 use alpm::{
     Alpm, SigLevel,
 };
-use flate2::read::GzDecoder;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
-use tar::Archive;
 
 use crate::napm::*;
-use crate::log_info;
-use crate::util::require_root;
 
 impl Napm {
     pub fn h(&self) -> &Alpm {
@@ -19,10 +11,6 @@ impl Napm {
 
     pub fn h_mut(&mut self) -> &mut Alpm {
         self.handle.as_mut().unwrap()
-    }
-
-    pub fn file_cache_dir(&self) -> PathBuf {
-        Path::new(self.h().root()).join("var/cache/pacman/files")
     }
 
     pub fn local_pkg(&self, name: &str) -> Result<Pkg> {
@@ -57,79 +45,6 @@ impl Napm {
             .iter()
             .map(|name| self.pkg(name))
             .collect()
-    }
-
-    pub fn update_file_listing_cache(&mut self) -> Result<()> {
-        require_root()?;
-
-        self.h_mut().set_dbext(".files");
-
-        self.update()?;
-
-        let cache_dir = self.file_cache_dir();
-        
-        let handle = self.h_mut();
-
-        let db_path = Path::new(handle.dbpath());
-        let sync_dir = db_path.join("sync");
-
-        if sync_dir.exists() {
-            for entry in fs::read_dir(&sync_dir).map_err(Error::InternalIO)? {
-                let entry = entry.map_err(Error::InternalIO)?;
-                let path = entry.path();
-
-                if let Some(filename) = path.file_name().and_then(|n| n.to_str())
-                    && filename.ends_with(".files")
-                {
-                    let db_name = filename.trim_end_matches(".files");
-                    let db_cache_dir = cache_dir.join(db_name);
-
-                    let should_update = if db_cache_dir.exists() {
-                        let sync_mtime = fs::metadata(&path).map_err(Error::InternalIO)?.modified().map_err(Error::InternalIO)?;
-                        let cache_mtime = fs::metadata(&db_cache_dir).map_err(Error::InternalIO)?.modified().map_err(Error::InternalIO)?;
-                        sync_mtime > cache_mtime
-                    } else {
-                        true
-                    };
-
-                    if should_update {
-                        log_info!("Updating file data for {db_name}");
-                        
-                        fs::remove_dir_all(&db_cache_dir).map_err(Error::InternalIO)?;
-                        fs::create_dir_all(&db_cache_dir).map_err(Error::InternalIO)?;
-
-                        Self::unarchive_files_db(&path, &db_cache_dir)
-                            .map_err(|_| Error::ExtractArchive)?;
-                    } else {
-                        log_info!("File data for {db_name} up to date");
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-    
-    pub fn unarchive_files_db(archive_path: &Path, extract_to: &Path) -> Result<()> {
-        if extract_to.exists() {
-            fs::remove_dir_all(extract_to)?;
-        }
-        fs::create_dir_all(extract_to)?;
-
-        let file = fs::File::open(archive_path).map_err(|_| Error::OpenArchive)?;
-        let decoder = GzDecoder::new(file);
-        let mut archive = Archive::new(decoder);
-
-        for entry in archive.entries()? {
-            let mut entry = entry?;
-            let path = entry.path()?.to_path_buf();
-            if path.as_os_str().is_empty() || path == Path::new(".") {
-                continue;
-            }
-            entry.unpack_in(extract_to)?;
-        }
-
-        Ok(())
     }
 
     pub fn parse_siglevel(values: &[String]) -> Result<SigLevel> {

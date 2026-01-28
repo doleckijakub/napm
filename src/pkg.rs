@@ -7,7 +7,7 @@ use crate::ansi::*;
 pub struct Pkg {
     pub name: String,
     pub version: String,
-    pub db_name: String,
+    pub repo: String,
     pub desc: String,
 }
 
@@ -15,10 +15,10 @@ impl Pkg {
     pub fn into_package_ref(self, handle: &Alpm) -> Result<&Package> {
         let expect_msg = format!(
             "package '{}' not found in '{}'",
-            self.name, self.db_name
+            self.name, self.repo
         );
 
-        if self.db_name == "local" {
+        if self.repo == "local" {
             handle
                 .localdb()
                 .pkg(self.name)
@@ -27,21 +27,28 @@ impl Pkg {
             handle
                 .syncdbs()
                 .iter()
-                .find(|db| *db.name() == self.db_name)
+                .find(|db| *db.name() == self.repo)
                 .expect(&expect_msg)
                 .pkg(self.name)
         }.map_err(|_| Error::FindPkg)
     }
 
-    pub fn format_name(name: &str) -> String {
-        format!(
-            "{ANSI_CYAN}{}{ANSI_RESET}",
-            name,
-        )
+    pub fn format_name(name: &str, version: Option<&str>) -> String {
+        if let Some(v) = version {
+            format!(
+                "{ANSI_CYAN}{}{ANSI_RESET}-{ANSI_MAGENTA}{}{ANSI_RESET}",
+                name, v
+            )
+        } else {
+            format!(
+                "{ANSI_CYAN}{}{ANSI_RESET}",
+                name,
+            )
+        }
     }
 
-    pub fn formatted_name(&self) -> String {
-        Self::format_name(&self.name)
+    pub fn formatted_name(&self, with_version: bool) -> String {
+        Self::format_name(&self.name, if with_version { Some(&self.version) } else { None })
     }
 }
 
@@ -50,7 +57,7 @@ impl From<&Package> for Pkg {
         Self {
             name: package.name().to_string(),
             version: package.version().to_string(),
-            db_name: package
+            repo: package
                 .db()
                 .map(|db| db.name())
                 .unwrap_or("local")

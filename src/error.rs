@@ -29,8 +29,11 @@ pub enum Error {
     #[error("No supported privilege escalation tool found ({}).", crate::util::PE_TOOLS.join(", "))]
     NoPETool,
 
-    #[error("User denied required privilege escalation")]
-    DeniedPE,
+    #[error("No supported shell found ({}).", crate::util::SHELLS.join(", "))]
+    NoShell,
+
+    #[error("User denied required privilege escalation, please run {ANSI_YELLOW}{0}{ANSI_RESET}")]
+    DeniedPE(String),
 
     #[error("Stopped by the user")]
     Stopped,
@@ -115,6 +118,9 @@ pub enum Error {
 
     #[error("Failed to remove a package")]
     TransRemovePkg,
+
+    #[error("Cache database error: {0}")]
+    CacheDatabaseError(rusqlite::Error),
 }
 
 impl Error {
@@ -133,6 +139,12 @@ impl From<std::io::Error> for Error {
 impl From<alpm::Error> for Error {
     fn from(err: alpm::Error) -> Error {
         Error::InternalALPM(err)
+    }
+}
+
+impl From<rusqlite::Error> for Error {
+    fn from(err: rusqlite::Error) -> Error {
+        Error::CacheDatabaseError(err)
     }
 }
 

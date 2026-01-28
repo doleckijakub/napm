@@ -3,7 +3,7 @@ use crate::napm::Napm;
 
 pub fn run(napm: &Napm) -> Result<()> {
     for pkg in napm.list() {
-        println!("{} {}", pkg.name, pkg.version);
+        println!("{}", pkg.formatted_name(true));
     }
 
     Ok(())

@@ -4,7 +4,7 @@ use alpm::{
 
 use crate::napm::*;
 use crate::{log_info, log_fatal};
-use crate::util::require_root;
+// use crate::util::require_root;
 
 macro_rules! log_repair {
     ($($arg:tt)*) => {{
@@ -107,15 +107,15 @@ impl Napm {
             | E::DbVersion
             | E::DbWrite
             | E::DbRemove => {
-                todo!("handling of {error:?} aka '{error}'");
+                unimplemented!("handling of {error:?} aka '{error}'");
             }
             E::ServerBadUrl | E::ServerNone => {
                 // Repository/server issue - check URL, network connectivity
-                todo!("handling of {error:?} aka '{error}'");
+                unimplemented!("handling of {error:?} aka '{error}'");
             }
             E::TransNotPrepared => Err(Error::NothingToDo),
             E::TransNotNull | E::TransNull => {
-                todo!("handling of {error:?} aka '{error}'");
+                unimplemented!("handling of {error:?} aka '{error}'");
             }
             E::TransDupTarget
             | E::TransDupFileName
@@ -124,48 +124,48 @@ impl Napm {
             | E::TransType
             | E::TransNotLocked
             | E::TransHookFailed => {
-                todo!("handling of {error:?} aka '{error}'");
+                unimplemented!("handling of {error:?} aka '{error}'");
             }
             E::PkgNotFound | E::PkgIgnored => {
                 // Package not found - show error
-                todo!("handling of {error:?} aka '{error}'");
+                unimplemented!("handling of {error:?} aka '{error}'");
             }
             E::PkgInvalid => {
                 // Clear cache
                 // Resync databases
                 // Retry operation
-                todo!("handling of {error:?} aka '{error}'");
+                unimplemented!("handling of {error:?} aka '{error}'");
             }
             E::PkgInvalidChecksum | E::PkgInvalidSig | E::PkgMissingSig => {
                 // Refresh keyring
                 // Resync databases
-                todo!("handling of {error:?} aka '{error}'");
+                unimplemented!("handling of {error:?} aka '{error}'");
             }
             E::PkgOpen => {
                 // Package file could not be opened - check permissions
-                todo!("handling of {error:?} aka '{error}'");
+                unimplemented!("handling of {error:?} aka '{error}'");
             }
             E::PkgCantRemove => {
                 // Package cannot be removed - maybe running process holds files
-                todo!("handling of {error:?} aka '{error}'");
+                unimplemented!("handling of {error:?} aka '{error}'");
             }
             E::PkgInvalidName | E::PkgInvalidArch => {
                 // Invalid package metadata - abort operation
-                todo!("handling of {error:?} aka '{error}'");
+                unimplemented!("handling of {error:?} aka '{error}'");
             }
             E::SigMissing | E::SigInvalid => {
                 // Refresh keyring
                 // Resync databases
-                todo!("handling of {error:?} aka '{error}'");
+                unimplemented!("handling of {error:?} aka '{error}'");
             }
             E::UnsatisfiedDeps => {
                 if let NapmErrorData::UnsatisfiedDeps(missing) = &data {
                     for dep in missing {
                         if let Some(causing_pkg) = &dep.causing_pkg {
                             log_fatal!(
-                                "Package {ANSI_YELLOW}{}{ANSI_RESET} requires {ANSI_YELLOW}{}{ANSI_RESET} to be installed",
-                                dep.target,
-                                causing_pkg
+                                "Package {} requires {} to be installed",
+                                Pkg::format_name(&dep.target, None),
+                                Pkg::format_name(&causing_pkg, None),
                             );
                         } else {
                             log_fatal!("Dependency {ANSI_YELLOW}{}{ANSI_RESET} missing", dep.target);
@@ -179,9 +179,9 @@ impl Napm {
                 if let NapmErrorData::ConflictingDeps(conflicts) = &data {
                     for c in conflicts {
                         log_fatal!(
-                            "Conflicting packages: {ANSI_YELLOW}{}{ANSI_RESET} and {ANSI_YELLOW}{}{ANSI_RESET}",
-                            c.pkg1.formatted_name(),
-                            c.pkg2.formatted_name()
+                            "Conflicting packages: {} and {}",
+                            c.pkg1.formatted_name(false),
+                            c.pkg2.formatted_name(false)
                         );
                     }
                 }
@@ -198,38 +198,42 @@ impl Napm {
 
                 Err(Error::FileConflicts)
             }
-            E::RetrievePrepare | E::Retrieve => {
+            E::Retrieve => {
+                // TODO: run upgrade and retry
+                unimplemented!("handling of {error:?} aka '{error}'")
+            }
+            E::RetrievePrepare => {
                 // Downloading/preparing package failed - retry
-                todo!("handling of {error:?} aka '{error}'");
+                unimplemented!("handling of {error:?} aka '{error}'");
             }
             E::InvalidRegex => {
                 // Invalid regex in package/db query - abort
-                todo!("handling of {error:?} aka '{error}'");
+                unimplemented!("handling of {error:?} aka '{error}'");
             }
             E::Libarchive | E::Libcurl | E::ExternalDownload | E::Gpgme => {
                 // External library failure - check system libraries
-                todo!("handling of {error:?} aka '{error}'");
+                unimplemented!("handling of {error:?} aka '{error}'");
             }
             E::MissingCapabilitySignatures => {
                 // Some required signatures are missing
-                todo!("handling of {error:?} aka '{error}'");
+                unimplemented!("handling of {error:?} aka '{error}'");
             }
         }
     }
 
-    pub fn update(&mut self) -> Result<bool> {
-        log_info!("Updating {} databases", match self.h().dbext() {
+    pub fn update(&mut self, dbext: &str) -> Result<bool> {
+        log_info!("Updating {} databases", match dbext {
             ".db" => "package",
             ".files" => "file",
             other => panic!("dbext = {other}")
         });
+        
+        self.h_mut().set_dbext(dbext);
 
-        require_root()?;
-
-        match self.h_mut().syncdbs_mut().update(true) {
+        match self.h_mut().syncdbs_mut().update(false) {
             Err(e) => {
                 self.on_alpm_error(e, NapmErrorData::Empty)?;
-                self.h_mut().syncdbs_mut().update(true).map_err(|_| Error::Update)
+                self.h_mut().syncdbs_mut().update(false).map_err(|_| Error::Update)
             }
             Ok(b) => Ok(b),
         }
@@ -300,7 +304,7 @@ impl Napm {
                             //         pkg2: Pkg::from(c.package2()),
                             //     })
                             //     .collect()
-                            // alpm does not work (segfaults here), doing it from scratch
+                            // alpm does not work (segfaults here) // TODO: do it from scratch
                             vec![],
                         ),
                         Some(CommitData::PkgInvalid(list)) => {

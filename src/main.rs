@@ -9,37 +9,43 @@ pub mod napm;
 
 pub mod commands {
     pub mod files;
+    pub mod find;
     pub mod info;
     pub mod install;
     pub mod list;
-    pub mod find;
     pub mod remove;
     pub mod search;
+    pub mod update;
     pub mod upgrade;
 }
 
 use error::{Error, Result};
-use napm::{ConfigOverride, Napm};
+use napm::Napm;
 
 #[derive(Parser)]
 #[command(name = "napm")]
 #[command(about = "napm - NeoArch Package Manager")]
 struct Cli {
-    #[arg(long, help = "Set an alternate system root")]
-    root: Option<String>,
-
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    #[command(about = "Display the current config")]
-    Config,
-
     #[command(about = "List the files of a package")]
     Files {
         package: String,
+
+        #[arg(long, short, default_value_t = false, help = "Show directories too")]
+        dirs: bool,
+    },
+
+    #[command(about = "Find packages that contain a specific file")]
+    Find {
+        path: String,
+
+        #[arg(long, default_value_t = false, help = "Only match exact paths (e.g. /bin/sudo)")]
+        exact: bool,
     },
 
     #[command(about = "Show package information")]
@@ -55,17 +61,6 @@ enum Commands {
     #[command(about = "List installed packages")]
     List,
 
-    #[command(about = "Find packages that contain a specific file")]
-    Find {
-        file: String,
-
-        #[arg(long, default_value_t = false, help = "Only match exact paths, e.g. /usr/bin/sudo")]
-        exact: bool,
-
-        #[arg(long, default_value_t = false, help = "Force fetch the files databases")]
-        fetch: bool,
-    },
-
     #[command(about = "Remove a package")]
     Remove {
         packages: Vec<String>,
@@ -76,31 +71,32 @@ enum Commands {
 
     #[command(about = "Search for a package by name or description")]
     Search {
-        package: String,
+        search_terms: Vec<String>,
 
         #[arg(long, short)]
         num_results: Option<u32>,
     },
 
+    #[command(about = "Update the package metadata, NOTE: this is not a system upgrade !!!")]
+    Update,
+
     #[command(about = "Upgrade all packages on the system")]
     Upgrade,
+}
+
+#[derive(Subcommand)]
+enum CacheSubcommand {
+    Update,
 }
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
-    let cfg_override = ConfigOverride { root: cli.root };
-
-    if let Commands::Config = cli.command {
-        println!("{:#?}", Napm::cfg(cfg_override)?);
-        return Ok(());
-    }
-
-    let mut napm = Napm::new(cfg_override)?;
+    let mut napm = Napm::new()?;
 
     match cli.command {
-        Commands::Config => panic!(),
-        Commands::Files { package } => commands::files::run(&mut napm, &package),
+        Commands::Update => commands::update::run(&mut napm),
+        Commands::Files { package, dirs } => commands::files::run(&mut napm, &package, dirs),
         Commands::Info { package } => commands::info::run(&napm, &package),
         Commands::Install { packages } => commands::install::run(
             &mut napm,
@@ -111,7 +107,7 @@ fn run() -> Result<()> {
                 .as_slice(),
         ),
         Commands::List => commands::list::run(&napm),
-        Commands::Find { file, exact, fetch } => commands::find::run(&mut napm, file, exact, fetch),
+        Commands::Find { path, exact } => commands::find::run(&mut napm, path, exact),
         Commands::Remove { packages, no_deep } => commands::remove::run(
             &mut napm,
             packages
@@ -121,10 +117,7 @@ fn run() -> Result<()> {
                 .as_slice(),
             !no_deep,
         ),
-        Commands::Search {
-            package,
-            num_results,
-        } => commands::search::run(&mut napm, &package, num_results),
+        Commands::Search { search_terms, num_results } => commands::search::run(&napm, search_terms, num_results),
         Commands::Upgrade => commands::upgrade::run(&mut napm),
     }?;
 
@@ -139,7 +132,5 @@ fn main() {
             log_fatal!("{}", err);
             std::process::exit(1)
         }
-    } else {
-        log_info!("Done");
     }
 }

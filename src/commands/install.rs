@@ -1,9 +1,11 @@
 use crate::error::{Error, Result};
-use crate::{log_info, log_error};
-use crate::util::confirm;
+use crate::log_error;
+use crate::util::{confirm, require_root};
 use crate::napm::Napm;
 
 pub fn run(napm: &mut Napm, pkg_names: &[&str]) -> Result<()> {
+    require_root()?;
+    
     let pkgs = {
         let pkgs_res = napm
             .pkgs(pkg_names)
@@ -20,7 +22,7 @@ pub fn run(napm: &mut Napm, pkg_names: &[&str]) -> Result<()> {
         let display_names: Vec<String> = pkgs_res
             .iter()
             .filter_map(|pkg| pkg.as_ref().ok())
-            .map(|pkg| pkg.formatted_name())
+            .map(|pkg| pkg.formatted_name(false))
             .collect();
 
         let invalid_errs = pkgs_res
@@ -43,8 +45,6 @@ pub fn run(napm: &mut Napm, pkg_names: &[&str]) -> Result<()> {
         if display_names.is_empty() {
             return Err(Error::NoValidPackage);
         }
-
-        log_info!("Installing {}", display_names.join(", "));
 
         pkgs_res
             .into_iter()
